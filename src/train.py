@@ -38,12 +38,15 @@ def train(config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     criterion = nn.BCEWithLogitsLoss()
 
-    mlflow.set_tracking_uri("mlruns")
+    # Best checkpoint tracking
+    best_iou = 0.0
+    best_checkpoint_path = config["model_save_path"].replace(".pth", "_best.pth")
+
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("carvana-unet")
 
     with mlflow.start_run():
 
-        # Log all hyperparameters from config
         mlflow.log_params({
             "epochs":        config["epochs"],
             "batch_size":    config["batch_size"],
@@ -91,7 +94,6 @@ def train(config):
             val_iou  /= len(val_loader)
             val_dice /= len(val_loader)
 
-            # Log metrics per epoch
             mlflow.log_metrics({
                 "train_loss": train_loss,
                 "val_loss":   val_loss,
@@ -107,9 +109,18 @@ def train(config):
                 f"Dice: {val_dice:.4f}"
             )
 
-        # Save checkpoint and log as artifact
+            # Save best checkpoint
+            if val_iou > best_iou:
+                best_iou = val_iou
+                torch.save(model.state_dict(), best_checkpoint_path)
+                mlflow.log_metric("best_iou", best_iou, step=epoch)
+                logger.info(f"New best model saved at epoch {epoch+1} with IoU: {best_iou:.4f}")
+
+        # Save last checkpoint and log artifacts
         torch.save(model.state_dict(), config["model_save_path"])
         mlflow.log_artifact(config["model_save_path"])
+        mlflow.log_artifact(best_checkpoint_path)
         mlflow.log_artifact("configs/config.yaml")
 
-        logger.info(f"Model saved to {config['model_save_path']}")
+        logger.info(f"Last checkpoint saved to {config['model_save_path']}")
+        logger.info(f"Best checkpoint saved to {best_checkpoint_path} with IoU: {best_iou:.4f}")
