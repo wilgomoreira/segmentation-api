@@ -1,10 +1,12 @@
 import logging
+import mlflow
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from src.dataset import CarvanaDataset
 from src.model import UNet
+from src.evaluate import compute_iou, compute_dice
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,36 +38,78 @@ def train(config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     criterion = nn.BCEWithLogitsLoss()
 
-    for epoch in range(config["epochs"]):
-        model.train()
-        train_loss = 0.0
+    mlflow.set_tracking_uri("mlruns")
+    mlflow.set_experiment("carvana-unet")
 
-        for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1} Train"):
-            images, masks = images.to(device), masks.to(device)
+    with mlflow.start_run():
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            optimizer.step()
+        # Log all hyperparameters from config
+        mlflow.log_params({
+            "epochs":        config["epochs"],
+            "batch_size":    config["batch_size"],
+            "learning_rate": config["learning_rate"],
+            "val_split":     config["val_split"],
+            "image_size":    str(config["image_size"]),
+            "optimizer":     "Adam",
+            "loss":          "BCEWithLogitsLoss",
+            "device":        str(device),
+        })
 
-            train_loss += loss.item()
+        for epoch in range(config["epochs"]):
+            model.train()
+            train_loss = 0.0
 
-        train_loss /= len(train_loader)
-
-        model.eval()
-        val_loss = 0.0
-
-        with torch.no_grad():
-            for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1} Val"):
+            for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1} Train"):
                 images, masks = images.to(device), masks.to(device)
+
+                optimizer.zero_grad()
                 outputs = model(images)
                 loss = criterion(outputs, masks)
-                val_loss += loss.item()
+                loss.backward()
+                optimizer.step()
 
-        val_loss /= len(val_loader)
+                train_loss += loss.item()
 
-        logger.info(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            train_loss /= len(train_loader)
 
-    torch.save(model.state_dict(), config["model_save_path"])
-    logger.info(f"Model saved to {config['model_save_path']}")
+            model.eval()
+            val_loss = 0.0
+            val_iou  = 0.0
+            val_dice = 0.0
+
+            with torch.no_grad():
+                for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1} Val"):
+                    images, masks = images.to(device), masks.to(device)
+                    outputs = model(images)
+                    loss = criterion(outputs, masks)
+                    preds = (torch.sigmoid(outputs) > 0.5).float()
+                    val_loss += loss.item()
+                    val_iou  += compute_iou(preds, masks)
+                    val_dice += compute_dice(preds, masks)
+
+            val_loss /= len(val_loader)
+            val_iou  /= len(val_loader)
+            val_dice /= len(val_loader)
+
+            # Log metrics per epoch
+            mlflow.log_metrics({
+                "train_loss": train_loss,
+                "val_loss":   val_loss,
+                "val_iou":    val_iou,
+                "val_dice":   val_dice,
+            }, step=epoch)
+
+            logger.info(
+                f"Epoch {epoch+1}/{config['epochs']} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"IoU: {val_iou:.4f} | "
+                f"Dice: {val_dice:.4f}"
+            )
+
+        # Save checkpoint and log as artifact
+        torch.save(model.state_dict(), config["model_save_path"])
+        mlflow.log_artifact(config["model_save_path"])
+        mlflow.log_artifact("configs/config.yaml")
+
+        logger.info(f"Model saved to {config['model_save_path']}")

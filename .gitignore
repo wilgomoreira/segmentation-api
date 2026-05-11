@@ -1,2 +1,18 @@
+# Data (too large for GitHub)
 data/
-models/ 
+
+# MLflow
+mlruns/
+mlflow.db
+
+# Models checkpoint
+models/
+
+# Environment
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/

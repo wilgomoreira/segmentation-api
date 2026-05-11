@@ -4,5 +4,7 @@ image_size: [256, 256]
 val_split: 0.1
 batch_size: 8
 learning_rate: 0.0001
-epochs: 10
+epochs: 2
 model_save_path: models/unet_carvana.pth
+in_channels: 3
+out_channels: 1
