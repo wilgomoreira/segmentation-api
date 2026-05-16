@@ -11,11 +11,6 @@ def save_checkpoint(model, optimizer, epoch, path):
     }
     torch.save(checkpoint, path)
 
-def load_checkpoint(model, optimizer, path, device):
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint["model_state"])
-    optimizer.load_state_dict(checkpoint["optimizer_state"])
-    return checkpoint["epoch"]
 
 def visualize_prediction(image, mask, pred, save_path=None):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))

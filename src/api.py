@@ -1,15 +1,20 @@
+import io
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from xml.parsers.expat import model
+ 
 import torch
 import yaml
-from fastapi import FastAPI
-from src.model import UNet
-from src.utils import load_checkpoint
-import io
-from fastapi import File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
 from PIL import Image
-from fastapi.responses import Response
-import numpy as np
+from torchvision import transforms as T
+ 
+from src.evaluate import compute_iou, compute_dice
+from src.model import UNet
+
+logger = logging.getLogger(__name__)
 
 model_state = {}
 
@@ -36,18 +41,18 @@ async def lifespan(app: FastAPI):
     checkpoint_path = config["model_save_path"]
 
     if Path(checkpoint_path).exists():
-        load_checkpoint(checkpoint_path, model, device=device)
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model_state["ready"] = True
-        print(f"Checkpoint loaded from {checkpoint_path}")
+        logger.info(f"Checkpoint loaded from {checkpoint_path}")
     else:
-        print(f"No checkpoint found at {checkpoint_path}. Train the model first.")
+        logger.info(f"No checkpoint found at {checkpoint_path}. Train the model first.")
 
-    print(f"Model loaded on {device}")
+    logger.info(f"Model loaded on {device}")
 
     yield
 
     model_state.clear()
-    print("Model released")
+    logger.info("Model released")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -82,9 +87,9 @@ async def predict(file: UploadFile = File(...)):
     config = model_state["config"]
 
     h, w = config["image_size"]
-    image = image.resize((w, h))
-    tensor = torch.from_numpy(
-    np.array(image, dtype="float32") / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
+    resize    = T.Resize((h, w))
+    to_tensor = T.ToTensor()
+    tensor = to_tensor(resize(image)).unsqueeze(0).to(device)
 
     with torch.no_grad():
         logits = model(tensor)
@@ -97,3 +102,46 @@ async def predict(file: UploadFile = File(...)):
     buf.seek(0)
 
     return Response(content=buf.read(), media_type="image/png")
+
+@app.post("/evaluate")
+async def evaluate(
+    image: UploadFile = File(...),
+    mask:  UploadFile = File(...),
+):
+
+    if not model_state.get("ready"):
+        raise HTTPException(status_code=503, detail="Model not ready. Please wait while the model initializes.")
+
+    # Read image (same as /predict)
+    raw_image = await image.read()
+    pil_image = Image.open(io.BytesIO(raw_image)).convert("RGB")
+
+    # Read ground truth mask
+    raw_mask = await mask.read()
+    pil_mask = Image.open(io.BytesIO(raw_mask)).convert("L")
+
+    model  = model_state["model"]
+    device = model_state["device"]
+    config = model_state["config"]
+
+    h, w      = config["image_size"]
+    resize    = T.Resize((h, w))
+    to_tensor = T.ToTensor()
+
+    # Inference
+    tensor = to_tensor(resize(pil_image)).unsqueeze(0).to(device)
+    with torch.no_grad():
+        logits = model(tensor)
+    pred = (torch.sigmoid(logits) > 0.5).float()   # shape: (1, 1, H, W)
+
+    # Ground truth: resize, convert to tensor, binarise
+    gt = to_tensor(resize(pil_mask)).unsqueeze(0).to(device)
+    gt = (gt > 0.5).float()           
+
+    iou  = compute_iou(pred, gt)
+    dice = compute_dice(pred, gt)
+
+    return JSONResponse({
+        "iou":  round(iou, 4),
+        "dice": round(dice, 4),
+    })
